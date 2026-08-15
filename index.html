@@ -650,7 +650,16 @@ function setD(k, v) {
     if (v !== "give") d.debtMode = false;
     if (v === "borrow_own") d.borrowFor = d.borrowFor || "self"; else d.borrowFor = "self";
   }
-  if (k === "borrowFor") d.person = "";
+  if (k === "borrowFor" && d.kind === "borrow_own") {
+    // The account is only an internal routing pot. The visible destination
+    // changes to people when "Someone else" is selected.
+    if (v === "person") {
+      d.to = d.to || firstAccount();
+    }
+  }
+  if (k === "person" && d.kind === "borrow_own") {
+    d.borrowFor = "person";
+  }
   if (k === "from" && d.kind === "move" && d.to === v) d.to = null;
   if (k === "to" && d.kind === "move" && d.from === v) d.from = null;
   render();
@@ -706,6 +715,27 @@ function potChips(list, selected, field, showBalance) {
   );
 }
 
+function personChips(selected) {
+  const ppl = peopleList();
+  return (
+    '<div class="wrap">' +
+    ppl.map((p) =>
+      '<button type="button" class="chip" aria-pressed="' + (selected === p.name) +
+      '" onclick="setD(\'person\',\'' + jsq(p.name) + '\')">' + esc(p.name) + "</button>"
+    ).join("") +
+    '<button type="button" class="chip add" onclick="newBorrowPerson()">+ New</button>' +
+    "</div>"
+  );
+}
+function newBorrowPerson() {
+  syncDraft();
+  const nm = prompt("Person's name");
+  if (nm && nm.trim()) {
+    draft().person = nm.trim();
+    render();
+  }
+}
+
 function openNamer(field, kind) {
   syncDraft();
   UI.sheet.namer = { field: field, kind: kind };
@@ -726,22 +756,26 @@ function commitNamer() {
 function entrySheet() {
   const d = draft(), K = KIND[d.kind];
   const amt = parseFloat(d.amount) || 0;
-  const froms = fromChoices(d.kind), tos = toChoices(d.kind, d.from);
+  const froms = fromChoices(d.kind);
+  const tos = toChoices(d.kind, d.from);
+  const visibleTos = d.kind === "borrow_own" && d.borrowFor === "person" ? [] : tos;
   const b = balances();
   const editing = !!d.id;
 
-  /* balance guard — never blocks, only tells the truth */
+  /* balance guard — borrowing from savings checks the savings goal, not the
+     account/person the money will be routed through. */
   let guard = "";
   let amountAllowed = true;
-  if (d.from && amt > 0) {
+  if (d.kind === "borrow_own" && d.from && amt > 0) {
     const bal = b[d.from] || 0;
-    if (d.kind === "borrow_own" && amt > bal) {
+    if (amt > bal) {
       amountAllowed = false;
       guard = '<div class="alert"><b>' + esc(potName(d.from)) + " has " + money(bal) +
-        " available.</b> You cannot borrow " + money(amt) +
-        " because it would take the savings below zero.</div>";
+        " available.</b> You can borrow up to that amount.</div>";
     }
-    const canSuggestAlt = d.kind !== "borrow_own" && d.kind !== "move";
+  } else if (d.from && amt > 0) {
+    const bal = b[d.from] || 0;
+    const canSuggestAlt = d.kind !== "move";
     if (bal <= 0) {
       const alt = canSuggestAlt ? accounts().filter((p) => p.id !== d.from && (b[p.id] || 0) >= amt).sort((x, y) => b[y.id] - b[x.id])[0] : null;
       guard =
@@ -758,7 +792,7 @@ function entrySheet() {
 
   const needPerson = K.people;
 
-  /* borrowing from a goal — show what's available, and let it go straight to someone if that's the plan */
+  /* borrowing from a savings goal */
   let borrowSection = "", borrowOk = true;
   if (!editing && d.kind === "borrow_own") {
     const avail = b[d.from] || 0;
@@ -769,11 +803,13 @@ function entrySheet() {
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor !== "person") + '" onclick="setD(\'borrowFor\',\'self\')">Myself</button>' +
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor === "person") + '" onclick="setD(\'borrowFor\',\'person\')">Someone else</button>' +
       "</div></div>";
+
     if (d.borrowFor === "person") {
       borrowSection +=
-        '<div class="alert" style="margin-top:-2px"><b>Anonymous transfer</b><br>' +
-        'The money will go from your savings to someone else. No person name is saved.</div>' +
-        '<div class="note" style="margin-top:-6px">It\'ll land in ' + esc(potName(d.to)) + " first, then go out to someone else — both steps logged together.</div>";
+        '<div class="field"><div class="label">Goes to</div>' +
+        personChips(d.person) +
+        "</div>";
+      if (!(d.person || "").trim()) borrowOk = false;
     }
   }
 
@@ -799,7 +835,7 @@ function entrySheet() {
     }
   }
 
-  const valid = amt > 0 && amountAllowed && (!froms.length || d.from) && (!tos.length || d.to) && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk;
+  const valid = amt > 0 && amountAllowed && (!froms.length || d.from) && (!(d.kind === "borrow_own" && d.borrowFor === "person") ? (!tos.length || d.to) : !!d.to) && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk;
 
   const kindRow = editing
     ? ""
@@ -831,7 +867,7 @@ function entrySheet() {
     kindRow +
     '<input id="f_amount" class="bigamt" type="number" inputmode="decimal" step="any" value="' + esc(d.amount) + '" placeholder="' + S.settings.currency + '0" oninput="syncDraft()" onchange="render()">' +
     (froms.length ? '<div class="field"><div class="label">' + (d.kind === "move" ? "Take it out of" : d.kind === "borrow_own" ? "Which savings goal" : "Money leaves") + "</div>" + potChips(froms, d.from, "from", true) + "</div>" : "") +
-    (tos.length ? '<div class="field"><div class="label">' + (d.kind === "save" ? "Into which goal" : d.kind === "move" ? "Put it into" : d.kind === "borrow_own" ? "Goes into" : "Money lands in") + "</div>" + potChips(tos, d.to, "to", d.kind === "move") + "</div>" : "") +
+    (visibleTos.length ? '<div class="field"><div class="label">' + (d.kind === "save" ? "Into which goal" : d.kind === "move" ? "Put it into" : d.kind === "borrow_own" ? "Goes into" : "Money lands in") + "</div>" + potChips(visibleTos, d.to, "to", d.kind === "move") + "</div>" : "") +
     (d.kind === "repay_own" ? '<div class="alert">Going back into <b>' + esc(potName(d.to)) + "</b> — the goal it came from.</div>" : "") +
     borrowSection +
     namer +
@@ -901,11 +937,11 @@ function submitEntry() {
   } else {
     const rec = addEntry(payload);
     let rec2 = null;
-    if (d.kind === "borrow_own" && d.borrowFor === "person") {
+    if (d.kind === "borrow_own" && d.borrowFor === "person" && (d.person || "").trim()) {
       rec2 = addEntry({
         kind: "give", amount: amt, from: d.to || null, to: null, cat: "Other",
-        person: "",
-        note: "Given to someone else from savings" + ((d.note || "").trim() ? " — " + (d.note || "").trim() : ""),
+        person: (d.person || "").trim(),
+        note: "From a savings loan" + ((d.note || "").trim() ? " — " + (d.note || "").trim() : ""),
         date: d.date || today(), due: "", linkedTo: null,
       });
     }
@@ -916,7 +952,7 @@ function submitEntry() {
     }
     closeSheet();
     toast(
-      rec2 ? "Borrowed " + money(rec.amount) + " from savings and gave it to someone else" : KIND[rec.kind].verb + " " + money(rec.amount) + " logged",
+      rec2 ? "Borrowed " + money(rec.amount) + " and gave it to " + rec2.person : KIND[rec.kind].verb + " " + money(rec.amount) + " logged",
       "Undo",
       () => {
         S.entries = S.entries.filter((x) => x.id !== rec.id && (!rec2 || x.id !== rec2.id));
@@ -2008,9 +2044,7 @@ window.addEventListener("keydown", (e) => {
    BOOT
    ============================================================ */
 load();
-let hasSavedLedger = false;
-try { hasSavedLedger = !!localStorage.getItem(KEY); } catch (e) {}
-if (!S.entries.length && !hasSavedLedger) save();
+if (!S.entries.length && !localStorage.getItem(KEY)) save();
 render();
 
 /* first run: gentle nudge instead of an empty screen */
@@ -2019,7 +2053,7 @@ if (!S.entries.length) {
 }
   if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js');
   });
 }
 </script>
