@@ -650,11 +650,7 @@ function setD(k, v) {
     if (v !== "give") d.debtMode = false;
     if (v === "borrow_own") d.borrowFor = d.borrowFor || "self"; else d.borrowFor = "self";
   }
-  if (k === "borrowFor") {
-    // Borrowing from your own savings never needs a person's name.
-    // "Someone else" is intentionally anonymous.
-    d.person = "";
-  }
+  if (k === "borrowFor") d.person = "";
   if (k === "from" && d.kind === "move" && d.to === v) d.to = null;
   if (k === "to" && d.kind === "move" && d.from === v) d.from = null;
   render();
@@ -739,15 +735,12 @@ function entrySheet() {
   let amountAllowed = true;
   if (d.from && amt > 0) {
     const bal = b[d.from] || 0;
-
     if (d.kind === "borrow_own" && amt > bal) {
       amountAllowed = false;
-      guard =
-        '<div class="alert"><b>' + esc(potName(d.from)) + " has " + money(bal) +
-        " available.</b> You can’t borrow " + money(amt) +
-        " because it would take the savings goal below zero.</div>";
+      guard = '<div class="alert"><b>' + esc(potName(d.from)) + " has " + money(bal) +
+        " available.</b> You cannot borrow " + money(amt) +
+        " because it would take the savings below zero.</div>";
     }
-
     const canSuggestAlt = d.kind !== "borrow_own" && d.kind !== "move";
     if (bal <= 0) {
       const alt = canSuggestAlt ? accounts().filter((p) => p.id !== d.from && (b[p.id] || 0) >= amt).sort((x, y) => b[y.id] - b[x.id])[0] : null;
@@ -777,10 +770,9 @@ function entrySheet() {
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor === "person") + '" onclick="setD(\'borrowFor\',\'person\')">Someone else</button>' +
       "</div></div>";
     if (d.borrowFor === "person") {
-      // Keep this anonymous: no person's name is collected or shown.
       borrowSection +=
         '<div class="alert" style="margin-top:-2px"><b>Anonymous transfer</b><br>' +
-        'The money will be removed from your savings and recorded as given to someone else. No person\'s name will be saved or shown.</div>' +
+        'The money will go from your savings to someone else. No person name is saved.</div>' +
         '<div class="note" style="margin-top:-6px">It\'ll land in ' + esc(potName(d.to)) + " first, then go out to someone else — both steps logged together.</div>";
     }
   }
@@ -910,8 +902,6 @@ function submitEntry() {
     const rec = addEntry(payload);
     let rec2 = null;
     if (d.kind === "borrow_own" && d.borrowFor === "person") {
-      // Anonymous: deliberately leave person blank so this never creates a
-      // named person in the People tab, charts, search, or history.
       rec2 = addEntry({
         kind: "give", amount: amt, from: d.to || null, to: null, cat: "Other",
         person: "",
@@ -2018,7 +2008,9 @@ window.addEventListener("keydown", (e) => {
    BOOT
    ============================================================ */
 load();
-if (!S.entries.length && !localStorage.getItem(KEY)) save();
+let hasSavedLedger = false;
+try { hasSavedLedger = !!localStorage.getItem(KEY); } catch (e) {}
+if (!S.entries.length && !hasSavedLedger) save();
 render();
 
 /* first run: gentle nudge instead of an empty screen */
@@ -2027,7 +2019,7 @@ if (!S.entries.length) {
 }
   if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js');
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
   });
 }
 </script>
