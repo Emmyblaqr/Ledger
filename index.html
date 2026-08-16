@@ -759,7 +759,7 @@ function potChips(list, selected, field, showBalance) {
       })
       .join("") +
     '<button type="button" class="chip add" onclick="openNamer(\'' + field + "','" +
-      (field === "to" && draft().kind === "save" ? "goal" : "account") + "')\">+ New</button>" +
+      (field === "to" && draft().kind === "save" ? "goal" : field === "from" && draft().kind === "borrow_own" ? "goal" : "account") + "')\">+ New</button>" +
     "</div>"
   );
 }
@@ -839,10 +839,12 @@ function entrySheet() {
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor === "person") + '" onclick="setD(\'borrowFor\',\'person\')">Someone else</button>' +
       "</div></div>";
     if (d.borrowFor === "person") {
+      const isNewPerson = (d.person || "").trim() && !people.some((p) => p.name === d.person);
       borrowSection +=
         '<div class="note" style="margin:-4px 0 12px">Goes straight to them — it won\'t land in one of your accounts, but it still shows as money you owe back to this goal.</div>' +
         '<div class="field"><div class="label">Who\'s it for?</div><div class="wrap">' +
         people.map((p) => '<button type="button" class="chip" aria-pressed="' + (d.person === p.name) + '" data-person="' + esc(p.name) + '" onclick="setD(\'person\',this.dataset.person)">' + esc(p.name) + "</button>").join("") +
+        (isNewPerson ? '<button type="button" class="chip" aria-pressed="true" data-person="' + esc(d.person) + '" onclick="setD(\'person\',this.dataset.person)">' + esc(d.person) + "</button>" : "") +
         '<button type="button" class="chip add" onclick="promptNewBorrowPerson()">+ New</button>' +
         "</div></div>";
       if (!(d.person || "").trim()) borrowOk = false;
