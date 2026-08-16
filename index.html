@@ -839,14 +839,12 @@ function entrySheet() {
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor === "person") + '" onclick="setD(\'borrowFor\',\'person\')">Someone else</button>' +
       "</div></div>";
     if (d.borrowFor === "person") {
-      const isNewPerson = (d.person || "").trim() && !people.some((p) => p.name === d.person);
       borrowSection +=
         '<div class="note" style="margin:-4px 0 12px">Goes straight to them — it won\'t land in one of your accounts, but it still shows as money you owe back to this goal.</div>' +
-        '<div class="field"><div class="label">Who\'s it for?</div><div class="wrap">' +
-        people.map((p) => '<button type="button" class="chip" aria-pressed="' + (d.person === p.name) + '" data-person="' + esc(p.name) + '" onclick="setD(\'person\',this.dataset.person)">' + esc(p.name) + "</button>").join("") +
-        (isNewPerson ? '<button type="button" class="chip" aria-pressed="true" data-person="' + esc(d.person) + '" onclick="setD(\'person\',this.dataset.person)">' + esc(d.person) + "</button>" : "") +
-        '<button type="button" class="chip add" onclick="promptNewBorrowPerson()">+ New</button>' +
-        "</div></div>";
+        '<div class="field"><div class="label">Who\'s it for?</div>' +
+        '<input id="f_person" value="' + esc(d.person || "") + '" placeholder="Name" list="borrowpeoplelist" oninput="syncDraft()" onchange="render()">' +
+        '<datalist id="borrowpeoplelist">' + people.map((p) => "<option>" + esc(p.name) + "</option>").join("") + "</datalist>" +
+        "</div>";
       if (!(d.person || "").trim()) borrowOk = false;
     } else {
       borrowSection += '<div class="note" style="margin:-4px 0 12px">Lands in whichever account you pick below, ready to spend.</div>';
@@ -931,14 +929,6 @@ function entrySheet() {
       : "") +
     (!editing && d.kind === "expense" ? '<div class="note center" style="margin-top:10px">Tip: hold this app on your home screen and log spending the moment it happens.</div>' : "")
   );
-}
-function promptNewBorrowPerson() {
-  syncDraft();
-  const nm = prompt("Person's name");
-  if (nm && nm.trim()) {
-    draft().person = nm.trim();
-  }
-  render();
 }
 function openCatNamer() {
   syncDraft();
@@ -1249,6 +1239,20 @@ function pageHome() {
       .join("") +
     "</div>";
 
+  /* the full picture: cash + what's saved + what's owed to you − what you owe */
+  const netWorth = total + totalSaved() + owedToMe() - iOwe();
+  out += card(
+    "Net worth",
+    "The full picture",
+    '<div class="num" style="font-size:26px;font-weight:650;margin-bottom:10px;color:' + (netWorth < 0 ? "var(--bad)" : "var(--ink)") + '">' + signed(netWorth) + "</div>" +
+    '<div class="stack" style="gap:7px">' +
+      moneyLine("Cash on hand", total, "") +
+      (totalSaved() ? moneyLine("In goals", totalSaved(), "") : "") +
+      (owedToMe() ? moneyLine("Owed to you", owedToMe(), "+") : "") +
+      (iOwe() ? moneyLine("You owe", iOwe(), "−") : "") +
+    "</div>"
+  );
+
   if (late.length || soon.length) {
     out +=
       '<button class="card" style="width:100%;text-align:left;border-color:' + (late.length ? "var(--bad)" : "var(--line2)") + '" onclick="UI.tab=\'people\';render()">' +
@@ -1308,14 +1312,21 @@ function pageHome() {
         .map((g) => {
           const have = b[g.id] || 0, t = g.target || 0, pct = t ? clamp(have / t, 0, 1) : 0;
           const borrowed = selfLoanFor(g.id);
+          const openLoan = debtRows().find((d) => d.e.kind === "borrow_own" && d.e.from === g.id && !d.settled);
           return (
-            '<button style="width:100%;text-align:left;margin-bottom:14px" onclick="go(\'pot\',\'' + g.id + '\')">' +
+            '<div style="margin-bottom:14px">' +
+            '<button style="width:100%;text-align:left" onclick="go(\'pot\',\'' + g.id + '\')">' +
             '<div class="row" style="margin-bottom:6px"><span class="grow" style="font-weight:600;font-size:14px">' + esc(g.name) + "</span>" +
             '<span class="num tiny ' + (t && have >= t ? "" : "dim") + '">' + money(have) + (t ? " / " + money(t) : "") + "</span></div>" +
             (t ? '<div class="track"><div class="fill" style="width:' + pct * 100 + '%"></div></div>' : "") +
             (t && have >= t ? '<div class="mini" style="margin-top:5px">Target reached</div>' : "") +
-            (borrowed ? '<div class="mini" style="margin-top:5px;color:var(--warn)">' + money(borrowed) + " borrowed out, not put back</div>" : "") +
-            "</button>"
+            "</button>" +
+            (borrowed
+              ? '<div class="mini" style="margin-top:5px;color:var(--warn)">' + money(borrowed) + " borrowed out, not put back" +
+                (openLoan ? ' <button class="btn sm ghost" style="margin-left:6px;padding:3px 10px" onclick="event.stopPropagation();openRepay(\'' + openLoan.e.id + '\')">Put it back</button>' : "") +
+                "</div>"
+              : "") +
+            "</div>"
           );
         })
         .join("") +
@@ -1891,6 +1902,7 @@ function pageSettings() {
     "Backup",
     '<div class="tiny muted" style="margin-bottom:14px">Nothing is sent anywhere — which also means nobody can get it back for you. Save a copy sometimes, especially before clearing your browser or changing phone.</div>' +
     '<button class="btn ghost" onclick="exportData()">Save a backup file</button>' +
+    '<div style="height:8px"></div><button class="btn ghost" onclick="exportCSV()">Export as CSV (spreadsheet)</button>' +
     '<div style="height:8px"></div><button class="btn ghost" onclick="copyData()">Copy backup as text</button>' +
     '<div style="height:8px"></div><label class="btn ghost" style="display:block;text-align:center;line-height:22px">Restore from a backup<input type="file" accept=".json,application/json" onchange="importFile(this)" style="display:none"></label>' +
     '<div class="mini dim center" style="margin-top:10px">' + S.entries.length + " entries · " + S.pots.length + " pots · last change " + (S.entries[0] ? shortDate(S.entries[0].date) : "—") + "</div>"
@@ -1962,6 +1974,39 @@ function exportData() {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   toast("Backup saved to your downloads");
+}
+function csvCell(v) {
+  const s = String(v == null ? "" : v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function exportCSV() {
+  const rows = [["Date", "Type", "Amount", "From", "To", "Person", "Category", "Note", "Expected back by"]];
+  S.entries
+    .slice()
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    .forEach((e) => {
+      rows.push([
+        e.date || "",
+        (KIND[e.kind] || {}).label || e.kind,
+        e.amount != null ? e.amount : "",
+        e.from ? potName(e.from) : "",
+        e.to ? potName(e.to) : "",
+        e.person || "",
+        e.cat || "",
+        e.note || "",
+        e.due || "",
+      ]);
+    });
+  const csv = rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "ledger-" + today() + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast("CSV saved to your downloads");
 }
 function copyData() {
   const txt = JSON.stringify(S);
