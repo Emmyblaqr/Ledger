@@ -267,6 +267,8 @@ const blank = () => ({
     { id: "p_salary", name: "Salary", kind: "account" },
     { id: "p_gig",    name: "Side gig", kind: "account" },
     { id: "p_cash",   name: "Cash", kind: "account" },
+    { id: "p_trading", name: "Trading", kind: "account" },
+    { id: "p_savings", name: "Savings", kind: "goal" },
   ],
   entries: [],
   expected: [],
@@ -290,6 +292,39 @@ let UI = {
   lastAdded: null,
 };
 
+/* adds any pot that exists in blank() (e.g. new default pots introduced
+   in an update) but is missing from previously-saved data, without
+   touching pots the user already has */
+function ensureDefaultPots(state) {
+  if (!Array.isArray(state.pots)) state.pots = [];
+  blank().pots.forEach((p) => {
+    if (!state.pots.some((x) => x.id === p.id)) state.pots.push(p);
+  });
+  /* "Borrowed savings" was a locked pot from an earlier version of the app —
+     self-borrows now land in a real account instead, so it's no longer a
+     default source. Drop it if nothing points to it; if old entries still
+     reference it, just hide it from pickers so those entries keep resolving. */
+  if (state.pots.some((p) => p.id === "p_borrowed")) {
+    const usesBorrowed = Array.isArray(state.entries) && state.entries.some((e) => e.from === "p_borrowed" || e.to === "p_borrowed");
+    if (usesBorrowed) {
+      const bp = state.pots.find((p) => p.id === "p_borrowed");
+      if (bp) bp.archived = true;
+    } else {
+      state.pots = state.pots.filter((p) => p.id !== "p_borrowed");
+    }
+  }
+  /* Save entries logged before any savings goal existed had nowhere to
+     land (to === null) — they still counted toward the monthly "saved"
+     stat on Charts, but weren't held anywhere, so nothing was borrowable
+     against them. Route those old entries into the default Savings goal
+     so the numbers agree everywhere. */
+  if (Array.isArray(state.entries) && state.pots.some((p) => p.id === "p_savings")) {
+    state.entries.forEach((e) => {
+      if (e.kind === "save" && !e.to) e.to = "p_savings";
+    });
+  }
+  return state;
+}
 function load() {
   let raw = null;
   try {
@@ -300,7 +335,7 @@ function load() {
   if (raw) {
     try {
       const d = JSON.parse(raw);
-      S = Object.assign(blank(), d);
+      S = ensureDefaultPots(Object.assign(blank(), d));
       S.settings = Object.assign(blank().settings, d.settings || {});
       if (!Array.isArray(S.cats) || !S.cats.length) S.cats = DEFAULT_CATS.slice();
     } catch (e) {
@@ -352,6 +387,18 @@ function balances() {
   return b;
 }
 const balanceOf = (id) => balances()[id] || 0;
+/* balance of a pot counting only entries from one calendar month — used so
+   borrowing against a savings goal is capped to what was saved that month,
+   not the goal's whole lifetime total */
+function monthlyBalanceOf(id, mk) {
+  let b = 0;
+  S.entries.forEach((e) => {
+    if (monthOf(e.date) !== mk) return;
+    if (e.from === id) b -= e.amount;
+    if (e.to === id) b += e.amount;
+  });
+  return b;
+}
 const totalCash = () => sum(accounts().map((p) => balanceOf(p.id)));
 const totalSaved = () => sum(goals().map((p) => balanceOf(p.id)));
 
@@ -384,6 +431,7 @@ function peopleList() {
     if (e.kind === "give") m.given += e.amount;
     if (e.kind === "lend") m.lent += e.amount;
     if (e.kind === "borrow") m.borrowed += e.amount;
+    if (e.kind === "borrow_own") m.given += e.amount;
     if (e.kind === "repay_in") m.backToMe += e.amount;
     if (e.kind === "repay_out") m.iPaid += e.amount;
   });
@@ -432,7 +480,14 @@ function monthStats(mk) {
   const es = S.entries.filter((e) => monthOf(e.date) === mk);
   const by = (k) => sum(es.filter((e) => e.kind === k).map((e) => e.amount));
   const inc = by("income"), spent = by("expense"), saved = by("save"), given = by("give"), lent = by("lend"), borrowed = by("borrow");
-  return { es, inc, spent, saved, given, lent, borrowed, out: spent + given + lent, left: inc + borrowed - spent - given - lent - saved };
+  const repaidIn = by("repay_in"), repaidOut = by("repay_out"), repaidOwn = by("repay_own");
+  /* Self-borrowed money only counts as money in when it actually lands in
+     one of your accounts (borrowed for yourself) — a self-borrow sent to
+     someone else never touches your accounts, so it's left out here. */
+  const borrowedOwn = sum(es.filter((e) => e.kind === "borrow_own" && e.to).map((e) => e.amount));
+  const inflow = inc + borrowed + borrowedOwn + repaidIn;
+  const outflow = spent + given + lent + saved + repaidOut + repaidOwn;
+  return { es, inc, spent, saved, given, lent, borrowed, borrowedOwn, repaidIn, repaidOut, repaidOwn, out: spent + given + lent, left: inflow - outflow };
 }
 
 /* recurring due */
@@ -642,13 +697,8 @@ function setD(k, v) {
     if (!K.people) d.person = "";
     if (!K.cat) d.cat = "";
     if (v === "income" || v === "borrow") { d.to = d.to || firstAccount(); d.from = null; }
-    else if (v === "borrow_own") {
-      // Borrowing from own savings MUST always take the money from a savings goal.
-      // Never reuse the old Salary/Client/Side gig/Cash selection as the source.
-      d.from = (goals()[0] || {}).id || null;
-      d.to = d.to || firstAccount();
-    }
-    else if (v === "save") { d.from = d.from || firstAccount(); d.to = goals().length ? d.to : null; }
+    else if (v === "borrow_own") { d.from = d.from || (goals()[0] || {}).id || null; d.to = d.borrowFor === "person" ? null : (d.to || firstAccount()); }
+    else if (v === "save") { d.from = d.from || firstAccount(); d.to = d.to || (goals()[0] || {}).id || null; }
     else if (v === "move") { /* keep both */ }
     else { d.from = d.from || firstAccount(); d.to = null; }
     if (v !== "lend" && v !== "borrow" && v !== "borrow_own") d.due = "";
@@ -657,6 +707,7 @@ function setD(k, v) {
   }
   if (k === "from" && d.kind === "move" && d.to === v) d.to = null;
   if (k === "to" && d.kind === "move" && d.from === v) d.from = null;
+  if (k === "borrowFor") d.to = v === "person" ? null : (d.to || firstAccount());
   render();
 }
 const firstAccount = () => {
@@ -673,10 +724,13 @@ function fromChoices(kind) {
   if (LANDS_IN.indexOf(kind) >= 0) return [];
   return accounts();
 }
-function toChoices(kind, fromId) {
+function toChoices(kind, fromId, borrowFor) {
   if (kind === "save") return goals();
   if (kind === "move") return S.pots.filter((p) => !p.archived && p.id !== fromId);
-  if (kind === "borrow_own") return accounts();
+  // Borrowing your own savings for yourself lands in a real account
+  // (Salary/Side gig/Cash) so it's spendable. Borrowing it for someone
+  // else has no landing account — it goes straight to them.
+  if (kind === "borrow_own") return borrowFor === "person" ? [] : accounts();
   if (LANDS_IN.indexOf(kind) >= 0) return accounts();
   return [];
 }
@@ -730,49 +784,70 @@ function commitNamer() {
 function entrySheet() {
   const d = draft(), K = KIND[d.kind];
   const amt = parseFloat(d.amount) || 0;
-  const froms = fromChoices(d.kind), tos = toChoices(d.kind, d.from);
+  const froms = fromChoices(d.kind), tos = toChoices(d.kind, d.from, d.borrowFor);
   const b = balances();
   const editing = !!d.id;
 
-  /* balance guard — never blocks, only tells the truth */
+  /* balance guard — blocks logging unless the pot actually has enough,
+     since S.settings.allowNegative is off by default */
   let guard = "";
+  let fundsOk = true;
+  const thisMonth = monthOf(today());
   if (d.from && amt > 0) {
-    const bal = b[d.from] || 0;
+    /* borrow_own is capped to what was saved into the goal THIS month, not
+       its lifetime balance — a goal can hold money from many months, but
+       only this month's contribution is borrowable */
+    const bal = d.kind === "borrow_own" ? monthlyBalanceOf(d.from, thisMonth) : (b[d.from] || 0);
     const canSuggestAlt = d.kind !== "borrow_own" && d.kind !== "move";
     if (bal <= 0) {
+      fundsOk = !!S.settings.allowNegative;
       const alt = canSuggestAlt ? accounts().filter((p) => p.id !== d.from && (b[p.id] || 0) >= amt).sort((x, y) => b[y.id] - b[x.id])[0] : null;
-      guard =
-        '<div class="alert"><b>' + esc(potName(d.from)) + " has nothing in it.</b> Logging this puts it at " +
-        signed(bal - amt) + "." +
-        (alt ? ' <button class="btn sm ghost" style="margin-top:9px" onclick="setD(\'from\',\'' + alt.id + '\')">Use ' + esc(alt.name) + " (" + money(b[alt.id]) + ") instead</button>" : "") +
-        "</div>";
+      guard = d.kind === "borrow_own"
+        ? '<div class="alert"><b>Nothing saved into this goal yet this month.</b> ' +
+          (fundsOk ? "Logging this puts it at " + signed(bal - amt) + "." : "You can only borrow from what you've saved this month.") + "</div>"
+        : '<div class="alert"><b>' + esc(potName(d.from)) + " has nothing in it.</b> " +
+          (fundsOk ? "Logging this puts it at " + signed(bal - amt) + "." : "You can't log this until there's money in it.") +
+          (alt ? ' <button class="btn sm ghost" style="margin-top:9px" onclick="setD(\'from\',\'' + alt.id + '\')">Use ' + esc(alt.name) + " (" + money(b[alt.id]) + ") instead</button>" : "") +
+          "</div>";
     } else if (bal < amt) {
-      guard =
-        '<div class="alert">' + esc(potName(d.from)) + " holds " + money(bal) + ". This is " + money(amt - bal) +
-        " more than that, so it goes to " + signed(bal - amt) + ".</div>";
+      fundsOk = !!S.settings.allowNegative;
+      if (d.kind === "borrow_own") {
+        guard =
+          '<div class="alert"><b>Not enough saved this month.</b> You\'ve saved ' + money(bal) +
+          " into this goal in " + monthName(thisMonth) + ", but you entered " + money(amt) + ".</div>";
+      } else {
+        guard =
+          '<div class="alert">' + esc(potName(d.from)) + " holds " + money(bal) + ". That's " + money(amt - bal) +
+          " short" + (fundsOk ? ", so it goes to " + signed(bal - amt) + "." : " — you can't log more than what's there.") + "</div>";
+      }
     }
   }
 
   const needPerson = K.people;
 
-  /* borrowing from a goal — show what's available, and let it go straight to someone if that's the plan */
+  /* Borrowing from savings: show the saved amount available in the goal,
+     then let the user pick which account the money actually lands in. */
   let borrowSection = "", borrowOk = true;
   if (!editing && d.kind === "borrow_own") {
-    const avail = b[d.from] || 0;
+    const saved = monthlyBalanceOf(d.from, thisMonth);
+    const people = peopleList();
     borrowSection =
-      '<div class="mini dim" style="margin:-8px 0 10px">Saved money: <b style="color:var(--ink)">' + money(avail) + "</b></div>" +
-      '<div class="note" style="margin:-4px 0 12px">This counts as a debt to yourself — it shows under Open loans until you put it back.</div>' +
+      '<div class="mini dim" style="margin:-8px 0 10px">Saved in ' + monthName(thisMonth) + ": <b style=\"color:var(--ink)\">" + money(saved) + "</b></div>" +
+      '<div class="note" style="margin:-4px 0 12px">You can only borrow from what you\'ve saved into this goal this month — not its full balance.</div>' +
       '<div class="field"><div class="label">Who is this for?</div><div class="wrap">' +
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor !== "person") + '" onclick="setD(\'borrowFor\',\'self\')">Myself</button>' +
       '<button type="button" class="chip" aria-pressed="' + (d.borrowFor === "person") + '" onclick="setD(\'borrowFor\',\'person\')">Someone else</button>' +
       "</div></div>";
     if (d.borrowFor === "person") {
       borrowSection +=
-        '<div class="field"><div class="label">Who\'s it for?</div>' +
-        '<input id="f_person" value="' + esc(d.person) + '" placeholder="Name" list="peoplelist" oninput="syncDraft()">' +
-        '<datalist id="peoplelist">' + peopleList().map((p) => "<option>" + esc(p.name) + "</option>").join("") + "</datalist></div>" +
-        '<div class="note" style="margin-top:-6px">It\'ll land in ' + esc(potName(d.to)) + " first, then go straight out to them — both steps logged together.</div>";
+        '<div class="note" style="margin:-4px 0 12px">Goes straight to them — it won\'t land in one of your accounts, but it still shows as money you owe back to this goal.</div>' +
+        '<div class="field"><div class="label">Who\'s it for?</div><div class="wrap">' +
+        people.map((p) => '<button type="button" class="chip" aria-pressed="' + (d.person === p.name) + '" data-person="' + esc(p.name) + '" onclick="setD(\'person\',this.dataset.person)">' + esc(p.name) + "</button>").join("") +
+        '<button type="button" class="chip add" onclick="promptNewBorrowPerson()">+ New</button>' +
+        "</div></div>";
       if (!(d.person || "").trim()) borrowOk = false;
+    } else {
+      borrowSection += '<div class="note" style="margin:-4px 0 12px">Lands in whichever account you pick below, ready to spend.</div>';
     }
   }
 
@@ -798,7 +873,7 @@ function entrySheet() {
     }
   }
 
-  const valid = amt > 0 && (!froms.length || d.from) && (!tos.length || d.to) && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk;
+  const valid = amt > 0 && (!froms.length || d.from) && (!tos.length || d.to) && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk && fundsOk;
 
   const kindRow = editing
     ? ""
@@ -829,10 +904,10 @@ function entrySheet() {
     '<button class="ico" onclick="closeSheet()" aria-label="Close">' + icon("x") + "</button></div>" +
     kindRow +
     '<input id="f_amount" class="bigamt" type="number" inputmode="decimal" step="any" value="' + esc(d.amount) + '" placeholder="' + S.settings.currency + '0" oninput="syncDraft()" onchange="render()">' +
-    (froms.length ? '<div class="field"><div class="label">' + (d.kind === "move" ? "Take it out of" : d.kind === "borrow_own" ? "Which savings goal" : "Money leaves") + "</div>" + potChips(froms, d.from, "from", true) + "</div>" : "") +
-    (tos.length ? '<div class="field"><div class="label">' + (d.kind === "save" ? "Into which goal" : d.kind === "move" ? "Put it into" : d.kind === "borrow_own" ? "Goes into" : "Money lands in") + "</div>" + potChips(tos, d.to, "to", d.kind === "move") + "</div>" : "") +
-    (d.kind === "repay_own" ? '<div class="alert">Going back into <b>' + esc(potName(d.to)) + "</b> — the goal it came from.</div>" : "") +
+    (froms.length ? '<div class="field"><div class="label">' + (d.kind === "move" ? "Take it out of" : d.kind === "borrow_own" ? "Saved money" : "Money leaves") + "</div>" + potChips(froms, d.from, "from", true) + "</div>" : "") +
     borrowSection +
+    (tos.length ? '<div class="field"><div class="label">' + (d.kind === "save" ? "Into which goal" : d.kind === "move" ? "Put it into" : d.kind === "borrow_own" ? "Goes into" : "Money lands in") + "</div>" + potChips(tos, d.to, "to", d.kind === "move" || d.kind === "borrow_own") + "</div>" : "") +
+    (d.kind === "repay_own" ? '<div class="alert">Going back into <b>' + esc(potName(d.to)) + "</b> — the goal it came from.</div>" : "") +
     namer +
     guard +
     catRow +
@@ -854,6 +929,14 @@ function entrySheet() {
       : "") +
     (!editing && d.kind === "expense" ? '<div class="note center" style="margin-top:10px">Tip: hold this app on your home screen and log spending the moment it happens.</div>' : "")
   );
+}
+function promptNewBorrowPerson() {
+  syncDraft();
+  const nm = prompt("Person's name");
+  if (nm && nm.trim()) {
+    draft().person = nm.trim();
+  }
+  render();
 }
 function openCatNamer() {
   syncDraft();
@@ -883,22 +966,8 @@ function submitEntry() {
     }
   }
 
-  // Final normalization: a savings loan always comes OUT of the selected
-  // savings goal and goes INTO the selected account. The old Salary/Client
-  // source can never be used accidentally.
-  let finalFrom = d.from || null;
-  let finalTo = d.to || null;
-  if (d.kind === "borrow_own") {
-    if (!pot(finalFrom) || pot(finalFrom).kind !== "goal") {
-      finalFrom = goals().find((g) => (balances()[g.id] || 0) >= amt)?.id || (goals()[0] || {}).id || null;
-    }
-    if (!finalTo || !pot(finalTo) || pot(finalTo).kind !== "account") {
-      finalTo = firstAccount();
-    }
-  }
-
   const payload = {
-    kind: d.kind, amount: amt, from: finalFrom, to: finalTo,
+    kind: d.kind, amount: amt, from: d.from || null, to: d.to || null,
     cat: KIND[d.kind].cat ? d.cat || "Other" : "",
     person: d.kind === "borrow_own" ? "" : (d.person || "").trim(),
     note: (d.note || "").trim(), date: d.date || today(), due: d.due || "",
@@ -913,14 +982,12 @@ function submitEntry() {
     toast("Entry updated", "Undo", () => Object.assign(S.entries.find((x) => x.id === before.id), before));
   } else {
     const rec = addEntry(payload);
-    let rec2 = null;
-    if (d.kind === "borrow_own" && d.borrowFor === "person" && (d.person || "").trim()) {
-      rec2 = addEntry({
-        kind: "give", amount: amt, from: d.to || null, to: null, cat: "Other",
-        person: (d.person || "").trim(),
-        note: "From a savings loan" + ((d.note || "").trim() ? " — " + (d.note || "").trim() : ""),
-        date: d.date || today(), due: "", linkedTo: null,
-      });
+    const rec2 = null;
+    // A savings withdrawal moves money from the goal (from) into the
+    // chosen account (to) in one entry.
+    if (d.kind === "borrow_own") {
+      rec.person = d.borrowFor === "person" ? (d.person || "").trim() : "";
+      save();
     }
     if (d.expectedId) {
       const x = S.expected.find((q) => q.id === d.expectedId);
@@ -929,7 +996,9 @@ function submitEntry() {
     }
     closeSheet();
     toast(
-      rec2 ? "Borrowed " + money(rec.amount) + " and gave it to " + rec2.person : KIND[rec.kind].verb + " " + money(rec.amount) + " logged",
+      rec.kind === "borrow_own" && rec.person
+        ? "Borrowed " + money(rec.amount) + " from savings for " + rec.person
+        : KIND[rec.kind].verb + " " + money(rec.amount) + " logged",
       "Undo",
       () => {
         S.entries = S.entries.filter((x) => x.id !== rec.id && (!rec2 || x.id !== rec2.id));
@@ -966,6 +1035,7 @@ function openEdit(id) {
     draft: {
       id: e.id, kind: e.kind, amount: String(e.amount), from: e.from, to: e.to, cat: e.cat,
       person: e.person, note: e.note, date: e.date, due: e.due || "", linkedTo: e.linkedTo || null,
+      borrowFor: e.kind === "borrow_own" ? (e.person ? "person" : "self") : "self",
     },
   };
   render();
@@ -979,7 +1049,7 @@ function openAdd(kind, pre) {
       {
         id: null, kind: k, amount: "",
         from: k === "borrow_own" ? (goals()[0] || {}).id || null : (KIND[k].people || k === "expense" || k === "save" || k === "move" ? firstAccount() : null),
-        to: k === "income" || k === "borrow" || k === "borrow_own" ? firstAccount() : k === "save" ? (goals()[0] || {}).id || null : null,
+        to: k === "income" || k === "borrow" ? firstAccount() : k === "borrow_own" ? firstAccount() : k === "save" ? (goals()[0] || {}).id || null : null,
         cat: KIND[k].cat ? S.cats[0] : "", person: "", note: "", date: today(), due: "", linkedTo: null, debtMode: false, openingAmount: "", borrowFor: "self",
       },
       pre || {}
@@ -1213,11 +1283,13 @@ function pageHome() {
     "This month",
     monthName(monthOf(today())),
     '<div class="stack" style="gap:9px">' +
-      moneyLine("Money in", st.inc + st.borrowed, "+") +
+      moneyLine("Money in", st.inc + st.borrowed + st.borrowedOwn + st.repaidIn, "+") +
       moneyLine("Spent", st.spent, "−") +
       (st.given ? moneyLine("Given away", st.given, "−") : "") +
       (st.lent ? moneyLine("Lent out", st.lent, "−") : "") +
       (st.saved ? moneyLine("Put into goals", st.saved, "−") : "") +
+      (st.repaidOwn ? moneyLine("Put back in savings", st.repaidOwn, "−") : "") +
+      (st.repaidOut ? moneyLine("Paid back to people", st.repaidOut, "−") : "") +
       '<div style="border-top:1px solid var(--line);padding-top:9px">' +
       moneyLine(st.left >= 0 ? "Still unspent" : "Overspent by", st.left, "", true) +
       "</div>" +
@@ -1520,7 +1592,7 @@ function pagePot(id) {
     '<div class="row" style="gap:8px;margin-bottom:12px">' +
     (isGoal
       ? '<button class="btn ghost" onclick="openAdd(\'save\',{to:\'' + id + '\'})">Add to goal</button>' +
-        '<button class="btn ghost" onclick="openAdd(\'borrow_own\',{from:\'' + id + "',to:firstAccount()})\">Borrow from this goal</button>"
+        '<button class="btn ghost" onclick="openAdd(\'borrow_own\',{from:\'' + id + "'})\">Borrow from this goal</button>"
       : '<button class="btn ghost" onclick="openAdd(\'income\',{to:\'' + id + '\'})">Money in</button>' +
         '<button class="btn ghost" onclick="openAdd(\'expense\',{from:\'' + id + '\'})">Spend from here</button>') +
     "</div>" +
@@ -1912,7 +1984,7 @@ function importFile(input) {
       const d = JSON.parse(r.result);
       if (!d || !Array.isArray(d.entries)) throw 0;
       if (!confirm("Replace what's on this phone with the backup? " + d.entries.length + " entries will load.")) return;
-      S = Object.assign(blank(), d);
+      S = ensureDefaultPots(Object.assign(blank(), d));
       S.settings = Object.assign(blank().settings, d.settings || {});
       save();
       UI.page = null;
