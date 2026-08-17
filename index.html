@@ -696,6 +696,15 @@ function setD(k, v) {
     const K = KIND[v];
     if (!K.people) d.person = "";
     if (!K.cat) d.cat = "";
+    // A pot chosen under the previous kind may not be a legal choice for
+    // this one (e.g. an account picked while on "Expense" is not a valid
+    // "from" for "Borrow from savings", which must be a goal). Drop it so
+    // the defaults below pick a correct one instead of silently keeping a
+    // mismatched pot that then never actually moves the money it should.
+    const okFroms = fromChoices(v).map((p) => p.id);
+    const okTos = toChoices(v, d.from, d.borrowFor).map((p) => p.id);
+    if (d.from && okFroms.indexOf(d.from) < 0) d.from = null;
+    if (d.to && okTos.indexOf(d.to) < 0) d.to = null;
     if (v === "income" || v === "borrow") { d.to = d.to || firstAccount(); d.from = null; }
     else if (v === "borrow_own") { d.from = d.from || (goals()[0] || {}).id || null; d.to = d.borrowFor === "person" ? null : (d.to || firstAccount()); }
     else if (v === "save") { d.from = d.from || firstAccount(); d.to = d.to || (goals()[0] || {}).id || null; }
@@ -873,7 +882,9 @@ function entrySheet() {
     }
   }
 
-  const valid = amt > 0 && (!froms.length || d.from) && (!tos.length || d.to) && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk && fundsOk;
+  const fromOk = !froms.length || (d.from && froms.some((p) => p.id === d.from));
+  const toOk = !tos.length || (d.to && tos.some((p) => p.id === d.to));
+  const valid = amt > 0 && fromOk && toOk && (!needPerson || (d.person || "").trim()) && debtOk && borrowOk && fundsOk;
 
   const kindRow = editing
     ? ""
