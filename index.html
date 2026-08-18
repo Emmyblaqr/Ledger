@@ -640,6 +640,16 @@ function addPot(name, kind, target) {
     save();
     return found.id;
   }
+  // Accounts and goals are separate pots even if named alike, and every
+  // entry displays as "from -> to" by name — a same-named pair makes
+  // money movements unreadable (e.g. "Client -> Client"), so flag it.
+  const clash = S.pots.find((p) => p.name.toLowerCase() === nm.toLowerCase() && p.kind !== kind);
+  if (clash) {
+    const otherWord = clash.kind === "goal" ? "savings goal" : "source of money";
+    if (!confirm('You already have a ' + otherWord + ' called "' + clash.name + '". Using the same name for both makes it hard to tell them apart in your history. Create it anyway?')) {
+      return null;
+    }
+  }
   const p = { id: uid(), name: nm, kind: kind };
   if (kind === "goal" && target > 0) p.target = target;
   S.pots.push(p);
@@ -1066,9 +1076,12 @@ function openAdd(kind, pre) {
 function openRepay(debtId) {
   const e = S.entries.find((x) => x.id === debtId);
   if (!e) return;
+  const row = debtRows().find((d) => d.e.id === debtId);
+  const amt = row ? String(row.left) : "";
   if (e.kind === "borrow_own") {
     openAdd("repay_own", {
       kind: "repay_own",
+      amount: amt,
       linkedTo: e.id,
       from: firstAccount(),
       to: e.from,
@@ -1079,6 +1092,7 @@ function openRepay(debtId) {
   const isLend = e.kind === "lend";
   openAdd(isLend ? "repay_in" : "repay_out", {
     kind: isLend ? "repay_in" : "repay_out",
+    amount: amt,
     person: e.person,
     linkedTo: e.id,
     from: isLend ? null : firstAccount(),
@@ -1218,7 +1232,7 @@ function pageHome() {
   const total = totalCash();
   const st = monthStats(monthOf(today()));
   const due = dueRecurring();
-  const debts = debtRows().filter((d) => !d.settled);
+  const debts = debtRows().filter((d) => !d.settled && d.e.kind !== "borrow_own");
   const late = debts.filter((d) => d.e.due && daysLeft(d.e.due) < 0);
   const soon = debts.filter((d) => d.e.due && daysLeft(d.e.due) >= 0 && daysLeft(d.e.due) <= 7);
   const exp = S.expected.filter((x) => !x.done);
@@ -1653,7 +1667,12 @@ function pagePot(id) {
 function renamePot(id) {
   const p = pot(id);
   const nm = prompt("Name", p.name);
-  if (nm && nm.trim()) p.name = nm.trim();
+  if (nm && nm.trim()) {
+    const trimmed = nm.trim();
+    const clash = S.pots.find((x) => x.id !== p.id && x.kind !== p.kind && x.name.toLowerCase() === trimmed.toLowerCase());
+    const clear = !clash || confirm('You already have a ' + (clash.kind === "goal" ? "savings goal" : "source of money") + ' called "' + clash.name + '". Using the same name for both makes it hard to tell them apart in your history. Rename anyway?');
+    if (clear) p.name = trimmed;
+  }
   if (p.kind === "goal") {
     const t = prompt("Target amount (blank for none)", p.target || "");
     if (t === "") delete p.target;
